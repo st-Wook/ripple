@@ -8,6 +8,7 @@ local tweenSolver = require(script.Parent.solvers.tween)
 local intermediate = require(script.Parent.utils.intermediate)
 local assign = require(script.Parent.utils.assign)
 local merge = require(script.Parent.utils.merge)
+local Signal = require(script.Parent.utils.Signal)
 
 local defaults = {
 	heartbeat = RunService.Heartbeat,
@@ -21,9 +22,8 @@ local function createMotion<T>(initialValue: T, options: types.MotionOptions?): 
 	local motionState: { [any]: types.MotionState } = {}
 	local motionSolvers: { [any]: types.MotionSolver } = {}
 
-	local onStepListeners: { (value: T, deltaTime: number) -> () } = {}
-	local onCompleteListeners: { (value: T) -> () } = {}
-	local nextListenerId = 1
+	local onStepSignal: Signal.Signal<T, number>? = nil
+	local onCompleteSignal: Signal.Signal<T>? = nil
 
 	local connection: RBXScriptConnection?
 	local wasComplete = false
@@ -198,14 +198,14 @@ local function createMotion<T>(initialValue: T, options: types.MotionOptions?): 
 		local complete = self:isComplete()
 
 		if not wasComplete or not complete then
-			for _, listener in onStepListeners do
-				task.spawn(listener, value, deltaTime)
+			if onStepSignal then
+				onStepSignal:Fire(value, deltaTime)
 			end
 		end
 
 		if complete and (not wasComplete or lastCompleteValue ~= value) then
-			for _, listener in onCompleteListeners do
-				task.spawn(listener, value)
+			if onCompleteSignal then
+				onCompleteSignal:Fire(value)
 			end
 		end
 
@@ -225,34 +225,39 @@ local function createMotion<T>(initialValue: T, options: types.MotionOptions?): 
 		return true
 	end
 
-	local function onComplete(_self, callback)
-		local listenerId = nextListenerId
-		nextListenerId += 1
-		onCompleteListeners[listenerId] = callback
+	local function onComplete(_self, callback: (T) -> ())
+		if onCompleteSignal == nil then
+			onCompleteSignal = Signal.new()
+		end
+		local connection = (onCompleteSignal :: Signal.Signal<T>):Connect(callback)
 
 		return function()
-			onCompleteListeners[listenerId] = nil
+			connection:Disconnect()
 		end
 	end
 
 	local function onStep(_self, callback)
-		local listenerId = nextListenerId
-		nextListenerId += 1
-		onStepListeners[listenerId] = callback
+		if onStepSignal == nil then
+			onStepSignal = Signal.new()
+		end
+		local connection = (onStepSignal :: Signal.Signal<T, number>):Connect(callback)
 
 		return function()
-			onStepListeners[listenerId] = nil
+			connection:Disconnect()
 		end
 	end
 
 	local function destroy()
 		wasComplete = false
-		nextListenerId = 1
 
 		stop()
 
-		table.clear(onStepListeners)
-		table.clear(onCompleteListeners)
+		if onStepSignal then
+			onStepSignal:Destroy()
+		end
+		if onCompleteSignal then
+			onCompleteSignal:Destroy()
+		end
 		table.clear(motionSolvers)
 
 		for _, state in motionState do
